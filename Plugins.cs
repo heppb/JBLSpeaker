@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace JBLSpeaker
 {
-    [BepInPlugin("drb.jblspeaker", "JBLSpeaker", "1.0.0")]
+    [BepInPlugin("drb.jblspeaker", "JBLSpeaker", "1.1.0")]
     [BepInDependency(REPOLib.MyPluginInfo.PLUGIN_GUID, BepInDependency.DependencyFlags.HardDependency)]
     public class Plugins : BaseUnityPlugin
     {
