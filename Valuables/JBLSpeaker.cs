@@ -70,8 +70,6 @@ namespace JBLSpeaker.Valuables
                 Debug.LogError("JBLSpeaker: musicTracks is empty!");
             if (!skipSource)
                 Debug.LogError("JBLSpeaker: SkipSource not assigned");
-
-            ShuffleMusic();
         }
 
         private void Start()
@@ -141,18 +139,12 @@ namespace JBLSpeaker.Valuables
             StopParticles(false);
         }
 
-        private void ShuffleMusic()
-        {
-            for (int i = musicTracks.Count - 1; i > 0; i--)
-            {
-                int j = Random.Range(0, i + 1);
-                (musicTracks[i], musicTracks[j]) = (musicTracks[j], musicTracks[i]);
-            }
-        }
-
         private void SkipTrack()
         {
             if (!isActive)
+                return;
+
+            if (!HasAuthority())
                 return;
 
             skipCount++;
@@ -162,41 +154,17 @@ namespace JBLSpeaker.Valuables
                 return;
             }
 
-            PlaySkipThenMusic();
+            int nextIndex = GetNextTrackIndex();
 
-            if (photonView.IsMine)
-                photonView.RPC(nameof(RPC_SkipTrack), RpcTarget.Others);
+            if (SemiFunc.IsMultiplayer())
+            {
+                photonView.RPC(nameof(RPC_PlayTrackIndex), RpcTarget.All, nextIndex);
+            }
+            else
+            {
+                PlayTrackByIndex(nextIndex);
+            }
         }
-        private void PlaySkipThenMusic()
-        {
-            if (!skipSource)
-            {
-                Debug.LogError("JBLSpeaker: SkipSource not assigned");
-                return;
-            }
-
-            if (musicTracks == null || musicTracks.Count == 0)
-            {
-                Debug.LogError("JBLSpeaker: No music tracks assigned");
-                return;
-            }
-
-            StopMusicOnly();
-
-            if (skipSource.clip)
-                skipSource.Play();
-
-            musicIndex++;
-            if (musicIndex >= musicTracks.Count)
-            {
-                ShuffleMusic();
-                musicIndex = 0;
-            }
-
-            float delay = skipSource.clip ? skipSource.clip.length : 0f;
-            Invoke(nameof(PlayCurrentMusic), delay);
-        }
-
 
         private void PlayCurrentMusic()
         {
@@ -465,38 +433,50 @@ namespace JBLSpeaker.Valuables
             return line;
         }
 
-        [PunRPC]
-        private void RPC_SkipTrack()
+        private void PlayTrackByIndex(int index)
         {
-            SkipTrack();
+            if (index < 0 || index >= musicTracks.Count)
+                return;
+
+            StopMusicOnly();
+
+            musicIndex = index;
+            currentMusic = musicTracks[musicIndex];
+            currentMusic.volume = grab.grabbed ? heldVolume : droppedVolume;
+            currentMusic.Play();
+
+            foreach (var ps in particles)
+                ps.Play();
         }
 
-        /*[PunRPC]
-        private void PlaySongRPC(int songIndex)
+        private int GetNextTrackIndex()
         {
-            if (songs == null || songs.Count == 0)
-            {
-                Debug.LogWarning("Every song is blacklisted...");
-                return;
-            }
+            if (musicTracks == null || musicTracks.Count == 0)
+                return -1;
 
-            if (songIndex < 0 || songIndex >= songs.Count)
-            {
-                Debug.LogWarning($"Invalid song index {songIndex}. Valid range is 0 to {songs.Count - 1}.");
-                return;
-            }
+            int next = musicIndex + 1;
+            if (next >= musicTracks.Count)
+                next = 0;
 
-            if (!_isPlaying)
-            {
-                _isPlaying = true;
+            return next;
+        }
 
-                audioSource.clip = songs[songIndex];
-                audioSource.Play();
+        private bool HasAuthority()
+        {
+            if (!SemiFunc.IsMultiplayer())
+                return true;
 
-                _currentSongIndex = songIndex;
+            if (!photonView)
+                return false;
 
-                PlayParticles(songIndex);
-            }
-        }*/
+            // Prefer ownership, fallback to master
+            return photonView.IsMine || PhotonNetwork.IsMasterClient;
+        }
+
+        [PunRPC]
+        private void RPC_PlayTrackIndex(int index)
+        {
+            PlayTrackByIndex(index);
+        }
     }
 }
