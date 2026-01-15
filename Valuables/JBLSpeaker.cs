@@ -24,14 +24,9 @@ namespace JBLSpeaker.Valuables
         private bool isActive;
 
         [Header("Drop Audio")]
-        public float droppedVolume = 0.25f;
+        public float droppedVolume = 0.5f;
         public float heldVolume = 0.8f;
 
-        private float[] audioSamples = new float[256];
-        private float headBobStrength = 0.03f;
-
-        [SerializeField]
-        private AudioSource voiceSource;
         [SerializeField] 
         private AudioSource connectedSource;
         [SerializeField] 
@@ -39,27 +34,18 @@ namespace JBLSpeaker.Valuables
         [SerializeField] 
         private List<AudioSource> musicTracks;
 
-        [SerializeField]
-        private List<AudioClip> lyricClips;
+        private Dictionary<AudioSource, string[]> lyricLines;
 
-        [System.Serializable]
-        public class TrackLyrics
-        {
-            public AudioSource track;
-            public List<AudioClip> lyrics;
-        }
-
-        [Header("Lyrics")]
-        public List<TrackLyrics> trackLyrics;
-        public float lyricInterval = 3f;
-
-        private float lyricTimer;
         private AudioSource currentMusic;
-
-        [Header("Voice")]
-        [SerializeField] private float voiceCooldown = 1.5f;
-
-        private float lastVoiceTime;
+        private enum State
+        {
+            Idle = 0,
+            Active = 1
+        }
+        private State currentState;
+        private float coolDownUntilNextSentence = 3f;
+        private string playerName = "{playerName}";
+        private PhysGrabObject physGrabObject;
 
         private void Awake()
         {
@@ -78,8 +64,6 @@ namespace JBLSpeaker.Valuables
                     skipSource = src;
                 else if (src.gameObject.name.StartsWith("Music"))
                     musicTracks.Add(src);
-                else if (src.gameObject.name == "VoiceSource")
-                    voiceSource = src;
             }
 
             if (musicTracks.Count == 0)
@@ -88,6 +72,12 @@ namespace JBLSpeaker.Valuables
                 Debug.LogError("JBLSpeaker: SkipSource not assigned");
 
             ShuffleMusic();
+        }
+
+        private void Start()
+        {
+            physGrabObject = GetComponent<PhysGrabObject>();
+            GenerateLyrics();
         }
 
         private void Update()
@@ -116,11 +106,17 @@ namespace JBLSpeaker.Valuables
             }
             if (grab.grabbed && currentMusic && currentMusic.isPlaying)
             {
-                lyricTimer += Time.deltaTime;
-                if (lyricTimer >= lyricInterval)
+                if (SemiFunc.IsMultiplayer())
                 {
-                    TrySpeakLyricForCurrentTrack();
-                    lyricTimer = 0f;
+                    switch (currentState)
+                    {
+                        case State.Idle:
+                            StateIdle();
+                            break;
+                        case State.Active:
+                            StateActive();
+                            break;
+                    }
                 }
             }
         }
@@ -248,49 +244,46 @@ namespace JBLSpeaker.Valuables
             if (collision.relativeVelocity.magnitude >= slamVelocityThreshold)
                 SkipTrack();
         }
-
         private void ApplyHeadBob(AudioSource src)
         {
-            if (!src || !src.isPlaying)
+            if (!src || !src.isPlaying || !physGrabObject.grabbed)
                 return;
 
-            src.GetOutputData(audioSamples, 0);
-
-            float sum = 0f;
-            for (int i = 0; i < audioSamples.Length; i++)
-                sum += Mathf.Abs(audioSamples[i]);
-
-            float rms = sum / audioSamples.Length;
-            float bob = rms * headBobStrength;
-
-            foreach (var player in GameDirector.instance.PlayerList)
+            float finalTilt;
+            float bpm = 0f;
+            bpm = src.name switch
             {
-                if (player == null) continue;
-
-                float dist = Vector3.Distance(player.transform.position, transform.position);
-                if (dist > 8f) continue;
-
-                if (player.isLocal)
-                    CameraAim.Instance.AdditiveAimY(bob);
-                else
-                    player.playerAvatarVisuals.HeadTiltOverride(bob);
+                "Music_01" => 104f,
+                "Music_02" => 93f,
+                "Music_03" => 128f,
+                "Music_04" => 140f,
+                _ => 0f,
+            };
+            if (bpm <= 0f)
+            {
+                finalTilt = Mathf.Sin(Time.time * 15f) * 25f;
             }
-        }
-        private void TrySpeakLyricForCurrentTrack()
-        {
-            if (currentMusic == null) return;
-
-            if (trackLyrics == null) return;
-            foreach (var entry in trackLyrics)
+            else
             {
-                if (entry == null) continue;
-                if (entry.track == null || entry.lyrics == null) continue;
+                float beatFreq = bpm / 60f;
+                float beatBob = Mathf.Sin(Time.time * Mathf.PI * 2f * beatFreq);
+                finalTilt = (beatBob) * 25f;
+            }
 
-                if (entry.track == currentMusic && entry.lyrics.Count > 0)
+            foreach (PhysGrabber grabber in physGrabObject.playerGrabbing)
+            {
+                if (grabber == null)
+                    continue;
+
+                if (grabber.isLocal)
                 {
-                    var clip = entry.lyrics[Random.Range(0, entry.lyrics.Count)];
-                    Speak(clip);
-                    return;
+                    grabber.playerAvatar.playerExpression.OverrideExpressionSet(4, 100f);
+                    PlayerExpressionsUI.instance.playerExpression.OverrideExpressionSet(4, 100f);
+                    PlayerExpressionsUI.instance.playerAvatarVisuals.HeadTiltOverride(finalTilt * 0.5f);
+                }
+                else
+                {
+                    grabber.playerAvatar.playerAvatarVisuals.HeadTiltOverride(finalTilt);
                 }
             }
         }
@@ -314,21 +307,162 @@ namespace JBLSpeaker.Valuables
         {
             SetMusicVolume(heldVolume);
         }
-
-        private void Speak(AudioClip clip)
+        private void GenerateLyrics()
         {
-            if (!clip || !voiceSource)
-                return;
+            Debug.Log("JBLSpeaker: Generate Lyrics");
+            lyricLines = new Dictionary<AudioSource, string[]>();
 
-            if (voiceSource.isPlaying)
-                return;
+            foreach (var track in musicTracks)
+            {
+                if (track.name.Contains("Music_01"))
+                {
+                    //679
+                    lyricLines[track] = new[]
+                    {
+                        "I got a glock in my rari",
+                        "I'm like, yeah, she's fine",
+                        "Wonder when {playerName} will be mine",
+                        "17 shots, no 38",
+                        "Seventeen Thirty Eight"
+                    };
+                }
+                else if (track.name.Contains("Music_02"))
+                {
+                    //Again
+                    lyricLines[track] = new[]
+                    {
+                        "I want you to be mine again baby",
+                        "I know my lifestyle is driving you crazy",
+                        "Married to the money I aint never letting go",
+                        "I go out of the way to see you",
+                        "{playerName} I hope you know I need you"
+                    };
+                }
+                else if (track.name.Contains("Music_03"))
+                {
+                    //My Way
+                    lyricLines[track] = new[]
+                    {
+                        "{playerName} won't you come my way",
+                        "Got something I want to say",
+                        "Watch me pull out all this dough",
+                        "Cannot keep you out my brain",
+                        "Flexin on your ex I know"
+                    };
+                }
+                else if (track.name.Contains("Music_04"))
+                {
+                    //Trapqueen
+                    lyricLines[track] = new[]
+                    {
+                        "She's my trap queen, let her hit the bando",
+                        "I'm like hey, what's up? Hello",
+                        "Seventeen Thirty Eight ayy",
+                        "And I can ride with my baby",
+                        "{playerName} can hit it from behind"
+                    };
+                }
+                else
+                {
+                    // Generic fallback lines
+                    lyricLines[track] = new[]
+                    {
+                        "This song slaps",
+                        "Certified banger",
+                        "Straight fire",
+                        "Seventeen Thirty Eight",
+                        "{playerName} is the best"
+                    };
+                }
+            }
+        }
+        private void StateIdle()
+        {
+            if (coolDownUntilNextSentence > 0f && physGrabObject.grabbed)
+            {
+                coolDownUntilNextSentence -= Time.deltaTime;
+            }
+            else
+            {
+                if (!PhysGrabber.instance || !PhysGrabber.instance.grabbed || !PhysGrabber.instance.grabbedPhysGrabObject || !(PhysGrabber.instance.grabbedPhysGrabObject == physGrabObject))
+                {
+                    return;
+                }
+                bool flag = false;
+                if (!SemiFunc.IsMultiplayer())
+                {
+                    playerName = "JBL Speaker";
+                    flag = true;
+                }
+                else
+                {
+                    List<PlayerAvatar> list = SemiFunc.PlayerGetAllPlayerAvatarWithinRange(10f, PhysGrabber.instance.transform.position);
+                    PlayerAvatar playerAvatar = null;
+                    float num = float.MaxValue;
+                    foreach (PlayerAvatar item in list)
+                    {
+                        if (!(item == PlayerAvatar.instance))
+                        {
+                            float num2 = Vector3.Distance(PhysGrabber.instance.transform.position, item.transform.position);
+                            if (num2 < num)
+                            {
+                                num = num2;
+                                playerAvatar = item;
+                            }
+                        }
+                    }
+                    flag = true;
+                    if (playerAvatar != null)
+                    {
+                        playerName = playerAvatar.playerName;
+                    }
+                    else
+                    {
+                        playerName = "JBL Speaker";
+                    }
+                }
+                if (flag)
+                {
+                    string message = TrySpeakLyricForCurrentTrack();
+                    if (message != null)
+                    {
+                        currentState = State.Active;
+                        Color possessColor = new Color(1f, 0.3f, 0.6f, 1f);
+                        ChatManager.instance.PossessChatScheduleStart(10);
+                        ChatManager.instance.PossessChat(ChatManager.PossessChatID.LovePotion, message, 1f, possessColor);
+                        ChatManager.instance.PossessChatScheduleEnd();
+                    }                    
+                }
+            }
+        }
 
-            if (Time.time - lastVoiceTime < voiceCooldown)
-                return;
+        private void StateActive()
+        {
+            if (PhysGrabber.instance.grabbed && (bool)PhysGrabber.instance.grabbedPhysGrabObject && PhysGrabber.instance.grabbedPhysGrabObject != physGrabObject)
+            {
+                currentState = State.Idle;
+                coolDownUntilNextSentence = Random.Range(15f, 30f);
+            }
+            else if (!ChatManager.instance.StateIsPossessed())
+            {
+                currentState = State.Idle;
+                coolDownUntilNextSentence = Random.Range(15f, 30f);
+            }
+        }
 
-            voiceSource.clip = clip;
-            voiceSource.Play();
-            lastVoiceTime = Time.time;
+        private string TrySpeakLyricForCurrentTrack()
+        {
+            if (!currentMusic || !currentMusic.isPlaying)
+                return null;
+            if (!lyricLines.ContainsKey(currentMusic))
+                return null;
+            var lines = lyricLines[currentMusic];
+            if (lines.Length == 0)
+                return null;
+
+            string line = lines[Random.Range(0, lines.Length)];
+            line= line.Replace("{playerName}", playerName);
+            return line;
         }
 
         [PunRPC]
@@ -336,5 +470,33 @@ namespace JBLSpeaker.Valuables
         {
             SkipTrack();
         }
+
+        /*[PunRPC]
+        private void PlaySongRPC(int songIndex)
+        {
+            if (songs == null || songs.Count == 0)
+            {
+                Debug.LogWarning("Every song is blacklisted...");
+                return;
+            }
+
+            if (songIndex < 0 || songIndex >= songs.Count)
+            {
+                Debug.LogWarning($"Invalid song index {songIndex}. Valid range is 0 to {songs.Count - 1}.");
+                return;
+            }
+
+            if (!_isPlaying)
+            {
+                _isPlaying = true;
+
+                audioSource.clip = songs[songIndex];
+                audioSource.Play();
+
+                _currentSongIndex = songIndex;
+
+                PlayParticles(songIndex);
+            }
+        }*/
     }
 }
