@@ -46,6 +46,7 @@ namespace JBLSpeaker.Valuables
         private float coolDownUntilNextSentence = 3f;
         private string playerName = "{playerName}";
         private PhysGrabObject physGrabObject;
+        private bool hasStartedMusic;
 
         private void Awake()
         {
@@ -92,7 +93,7 @@ namespace JBLSpeaker.Valuables
             wasGrabbed = grab.grabbed;
 
             if (grab.grabbedLocal && Input.GetKeyDown(KeyCode.E))
-                SkipTrack();
+                RequestSkip();
 
             foreach (var src in musicTracks)
             {
@@ -131,6 +132,21 @@ namespace JBLSpeaker.Valuables
                 musicIndex = -1;
                 connectedSource.Play();
             }
+
+            if (!hasStartedMusic && musicTracks.Count > 0)
+            {
+                hasStartedMusic = true;
+
+                if (SemiFunc.IsMultiplayer())
+                {
+                    if (HasAuthority())
+                        photonView.RPC(nameof(RPC_PlayTrackIndex), RpcTarget.All, 0);
+                }
+                else
+                {
+                    PlayTrackByIndex(0);
+                }
+            }
         }
 
         private void OnDrop()
@@ -139,15 +155,10 @@ namespace JBLSpeaker.Valuables
             StopParticles(false);
         }
 
-        private void SkipTrack()
+        private void PerformSkipAuthoritative()
         {
-            if (!isActive)
-                return;
-
-            if (!HasAuthority())
-                return;
-
             skipCount++;
+
             if (skipCount >= maxSkipsBeforeOff)
             {
                 PowerOff();
@@ -210,7 +221,8 @@ namespace JBLSpeaker.Valuables
                 return;
 
             if (collision.relativeVelocity.magnitude >= slamVelocityThreshold)
-                SkipTrack();
+                if (HasAuthority())
+                    PerformSkipAuthoritative();
         }
         private void ApplyHeadBob(AudioSource src)
         {
@@ -460,6 +472,27 @@ namespace JBLSpeaker.Valuables
 
             return next;
         }
+        private void PlaySkipSound()
+        {
+            if (skipSource && skipSource.clip)
+                skipSource.Play();
+        }
+        private void RequestSkip()
+        {
+            if (!isActive)
+                return;
+
+            PlaySkipSound();
+
+            if (SemiFunc.IsMultiplayer())
+            {
+                photonView.RPC(nameof(RPC_RequestSkip), RpcTarget.MasterClient);
+            }
+            else
+            {
+                PerformSkipAuthoritative();
+            }
+        }
 
         private bool HasAuthority()
         {
@@ -477,6 +510,15 @@ namespace JBLSpeaker.Valuables
         private void RPC_PlayTrackIndex(int index)
         {
             PlayTrackByIndex(index);
+        }
+
+        [PunRPC]
+        private void RPC_RequestSkip()
+        {
+            if (!PhotonNetwork.IsMasterClient)
+                return;
+
+            PerformSkipAuthoritative();
         }
     }
 }
